@@ -1,0 +1,1285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#1d4ed8" />
+  <meta name="description" content="FinTrack — Personal Budget App with Financial Health Metrics" />
+  <title>💼 FinTrack — Personal Budget App</title>
+
+  <!-- PWA / mobile app meta -->
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="FinTrack" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,400&display=swap" rel="stylesheet" />
+
+  <!-- React 18 + ReactDOM (UMD, production) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- Babel standalone — transpiles JSX in the browser -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: #f8fafc; overscroll-behavior: none; }
+    body { font-family: 'DM Sans', system-ui, sans-serif; }
+    #root { height: 100%; }
+    /* Hide scrollbars globally */
+    * { -ms-overflow-style: none; scrollbar-width: none; }
+    *::-webkit-scrollbar { display: none; }
+    /* Loading splash */
+    #splash {
+      position: fixed; inset: 0; z-index: 9999;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: #f8fafc; gap: 14px;
+      transition: opacity .4s ease;
+    }
+    #splash.fade { opacity: 0; pointer-events: none; }
+    .splash-logo { font-size: 48px; animation: bounce .9s ease infinite alternate; }
+    .splash-text { font-size: 22px; font-weight: 800; color: #1d4ed8; letter-spacing: -.02em; }
+    .splash-sub  { font-size: 13px; color: #9ca3af; }
+    .spinner {
+      width: 36px; height: 36px; border: 3px solid #dbeafe;
+      border-top-color: #2563eb; border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin   { to { transform: rotate(360deg); } }
+    @keyframes bounce { to { transform: translateY(-8px); } }
+  </style>
+</head>
+<body>
+  <!-- Loading splash shown while Babel transpiles -->
+  <div id="splash">
+    <div class="splash-logo">💼</div>
+    <div class="splash-text">FinTrack</div>
+    <div class="splash-sub">Personal Budget &amp; Financial Health</div>
+    <div class="spinner"></div>
+  </div>
+
+  <div id="root"></div>
+
+  <!-- ─── App source (Babel transpiles JSX at runtime) ─── -->
+  <script type="text/babel" data-presets="react">
+    // ─── Make React hooks available as globals (replaces the import statement) ───
+    const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+    // ─── FX ─────────────────────────────────────────────────────────────────────
+    const FX_RATES   = { USD:1, THB:35.2, EUR:0.92, GBP:0.79 };
+    const FX_SYMBOLS = { USD:"$", THB:"฿", EUR:"€", GBP:"£" };
+
+    // ─── Constants ───────────────────────────────────────────────────────────────
+    const WPY=52, MPY=12;
+    const STORAGE_KEY="fintrack_v5";
+
+    const CATS = {
+      govDeductions:   { label:"Gov Deductions",    icon:"🏛️", color:"#6366f1", group:"pretax"  },
+      otherDeductions: { label:"Other Deductions",  icon:"📋", color:"#8b5cf6", group:"pretax"  },
+      pretaxDeductions:{ label:"Pretax Deductions", icon:"🛡️", color:"#7c3aed", group:"pretax"  },
+      fixedCosts:      { label:"Fixed Costs",       icon:"🏠", color:"#2563eb", group:"posttax" },
+      subscriptions:   { label:"Subscriptions",     icon:"📱", color:"#0891b2", group:"posttax" },
+      creditCards:     { label:"Credit Cards",      icon:"💳", color:"#db2777", group:"posttax" },
+      savings:         { label:"Savings",           icon:"🏦", color:"#16a34a", group:"savings"  },
+      investments:     { label:"Investments",       icon:"📈", color:"#d97706", group:"savings"  },
+    };
+
+    // ─── [F1] Helpers — defined FIRST ────────────────────────────────────────────
+    function uid0(){ return `${Date.now()}-${Math.random().toString(36).slice(2,7)}`; }
+    const uid = uid0;
+    const catSum = (items=[]) => items.reduce((s,i)=>s+Number(i.amount||0),0);
+    const fmtN   = (n,sym) => isNaN(n)||!isFinite(n)?"—":`${n<0?"-":""}${sym}${Math.abs(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+
+    // ─── Portfolio Defaults ───────────────────────────────────────────────────────
+    const makeDefaultData = () => ({
+      grossIncome:      { year:60000 },
+      govDeductions:    [{id:uid0(),name:"FIT Withheld",amount:0},{id:uid0(),name:"Social Security",amount:0},{id:uid0(),name:"Medicare EE",amount:0}],
+      otherDeductions:  [{id:uid0(),name:"ACC - Accident Ins.",amount:0},{id:uid0(),name:"CHT - Charity",amount:0},{id:uid0(),name:"CIL - Critical Illness",amount:0}],
+      pretaxDeductions: [{id:uid0(),name:"Dental Pre-Tax",amount:0},{id:uid0(),name:"HSA",amount:0},{id:uid0(),name:"Plan 401K",amount:0}],
+      fixedCosts:       [{id:uid0(),name:"Rent",amount:0},{id:uid0(),name:"Car Payment",amount:0,isDebt:true,balance:0,rate:6.5},{id:uid0(),name:"Car Insurance",amount:0}],
+      subscriptions:    [{id:uid0(),name:"Amazon Prime",amount:0},{id:uid0(),name:"Audible",amount:0},{id:uid0(),name:"Streaming",amount:0}],
+      creditCards:      [{id:uid0(),name:"Chase Sapphire",amount:0,isDebt:true,balance:0,rate:19.99},{id:uid0(),name:"Capital One",amount:0,isDebt:true,balance:0,rate:22.9}],
+      savings:          [{id:uid0(),name:"Emergency Fund",amount:0},{id:uid0(),name:"Travel",amount:0},{id:uid0(),name:"House Down Payment",amount:0}],
+      investments:      [{id:uid0(),name:"Roth 401K",amount:0},{id:uid0(),name:"Roth IRA",amount:0},{id:uid0(),name:"M1 Finance",amount:0}],
+      savingsBalance:   0,
+    });
+
+    const makeDefaultGoals = () => [
+      {id:uid0(),name:"Emergency Fund",    target:10000,saved:0,icon:"🛡️",color:"#6366f1"},
+      {id:uid0(),name:"House Down Payment",target:50000,saved:0,icon:"🏠",color:"#2563eb"},
+      {id:uid0(),name:"Dream Vacation",    target:5000, saved:0,icon:"✈️",color:"#0891b2"},
+    ];
+
+    const EMPTY_HISTORY = [];
+
+    const QUOTES = [
+      "Track every dollar. Awareness is the first step to freedom.",
+      "'Don't save what's left after spending; spend what's left after saving.' - Warren Buffett",
+      "A 1% savings increase today compounds dramatically over 20 years.",
+      "Build your emergency fund first: 3-6 months of expenses is your foundation.",
+      "Invest early, invest often. Time in the market beats timing the market.",
+      "Protect your income: life insurance is not an expense, it's a safety net.",
+      "Automate your savings. What you don't see, you won't spend.",
+      "'It's not your salary that makes you rich, it's your spending habits.' - Charles Jaffe",
+      "Every debt paid off early is a guaranteed return on investment.",
+      "Financial freedom is a mindset before it's a number.",
+    ];
+    const WEATHER = [
+      {icon:"☀️",desc:"Sunny",       temp:32,feel:"warm"},
+      {icon:"⛅",desc:"Partly Cloudy",temp:26,feel:"mild"},
+      {icon:"🌤️",desc:"Mostly Clear", temp:28,feel:"pleasant"},
+      {icon:"🌧️",desc:"Light Rain",   temp:20,feel:"cool"},
+      {icon:"🌤️",desc:"Clear Skies",  temp:30,feel:"warm"},
+    ];
+
+    // ─── DB Layer ─────────────────────────────────────────────────────────────────
+    const db = {
+      load: ()=>{ try{ const s=localStorage.getItem(STORAGE_KEY); return s?JSON.parse(s):null; }catch{ return null; } },
+      save: (p)=>{ try{ localStorage.setItem(STORAGE_KEY,JSON.stringify(p)); }catch{} },
+    };
+
+    // ─── Auth Hook ────────────────────────────────────────────────────────────────
+    function useAuth() {
+      const [user,setUser]=useState({id:"local",email:"user@local",displayName:"You"});
+      return { user, loading:false,
+        signIn: (email)=>setUser({id:"local",email,displayName:email.split("@")[0]}),
+        signOut:()=>setUser(null) };
+    }
+
+    // ─── Compute Engine ───────────────────────────────────────────────────────────
+    function compute(data, X=1) {
+      const grossYear  = Number(data.grossIncome?.year||0);
+      const grossMonth = grossYear/MPY;
+      const preTaxMo   = catSum(data.govDeductions)+catSum(data.otherDeductions)+catSum(data.pretaxDeductions);
+      const preTaxYear = preTaxMo*MPY;
+      const netYear    = grossYear-preTaxYear;
+      const netMonth   = netYear/MPY;
+      const netWeek    = netYear/WPY;
+      const fixedMo=catSum(data.fixedCosts), subsMo=catSum(data.subscriptions), ccMo=catSum(data.creditCards);
+      const savMo=catSum(data.savings), invMo=catSum(data.investments);
+      const postTaxMo  = fixedMo+subsMo+ccMo;
+      const savInvMo   = savMo+invMo;
+      const guiltFreeMo= netMonth-postTaxMo-savInvMo;
+      const savingsRate= netYear?(savInvMo*MPY)/netYear:0;
+      const opMargin        = grossYear?((grossYear-preTaxYear-fixedMo*MPY)/grossYear)*100:0;
+      const netProfitMargin = grossYear?((savMo+invMo)*MPY/grossYear)*100:0;
+      const totalSavings    = Number(data.savingsBalance||0);
+      const financialRunway = postTaxMo>0?totalSavings/postTaxMo:0;
+      const dtiRatio        = grossMonth>0?((fixedMo+ccMo)/grossMonth)*100:0;
+      return {
+        grossYear:grossYear*X, grossMonth:grossMonth*X,
+        netYear:netYear*X,     netMonth:netMonth*X,  netWeek:netWeek*X,
+        preTaxYear:preTaxYear*X, preTaxMo:preTaxMo*X,
+        postTaxYear:postTaxMo*MPY*X, postTaxMo:postTaxMo*X,
+        savInvYear:savInvMo*MPY*X,   savInvMo:savInvMo*X,
+        guiltFreeMo:guiltFreeMo*X,   guiltFreeWk:guiltFreeMo/(WPY/MPY)*X,
+        savingsRate, opMargin, netProfitMargin, financialRunway, dtiRatio,
+        catMonthly:{
+          govDeductions:catSum(data.govDeductions)*X, otherDeductions:catSum(data.otherDeductions)*X,
+          pretaxDeductions:catSum(data.pretaxDeductions)*X,
+          fixedCosts:fixedMo*X, subscriptions:subsMo*X, creditCards:ccMo*X,
+          savings:savMo*X, investments:invMo*X,
+        },
+      };
+    }
+
+    // ─── [F5] Debt Amortization ───────────────────────────────────────────────────
+    function amortize(balance, annualRate, minPayment, extraPayment=0) {
+      if(!balance||balance<=0||!minPayment) return null;
+      const mRate  = annualRate/100/12;
+      const firstInt = balance*mRate;
+      const payment  = minPayment+extraPayment;
+      if(mRate>0 && payment<=firstInt) return { months:Infinity, totalInt:Infinity, unresolvable:true };
+      let bal=balance, months=0, totalInt=0;
+      while(bal>0.005 && months<600){
+        const int=bal*mRate; totalInt+=int; bal=bal+int-payment;
+        if(bal<0) bal=0;
+        months++;
+      }
+      return { months, totalInt, unresolvable:false };
+    }
+
+    // ─── Shared Styles ────────────────────────────────────────────────────────────
+    const ss = {
+      card: {background:"#fff",border:"1px solid #e9ecef",borderRadius:16,boxShadow:"0 2px 8px rgba(0,0,0,.06)"},
+      chip: {fontSize:10,fontWeight:700,letterSpacing:"0.08em",textTransform:"uppercase",color:"#9ca3af"},
+      input:{border:"1px solid #e5e7eb",borderRadius:10,padding:"12px 14px",fontSize:15,outline:"none",width:"100%",background:"#fff"},
+      btn:  {border:"none",borderRadius:12,padding:"14px 0",fontSize:15,fontWeight:700,cursor:"pointer",width:"100%"},
+      tag:  {display:"inline-block",fontSize:10,fontWeight:700,borderRadius:20,padding:"2px 8px"},
+    };
+
+    // ─── [F7] GPU-Animated Bottom Sheet ──────────────────────────────────────────
+    function BottomSheet({ open, onClose, title, children }) {
+      const ref=useRef();
+      const [mounted, setMounted]=useState(false);
+      const [visible, setVisible]=useState(false);
+
+      useEffect(()=>{
+        let unmountTimer;
+        if(open){
+          setMounted(true);
+          requestAnimationFrame(()=>requestAnimationFrame(()=>setVisible(true)));
+          document.body.style.overflow="hidden";
+        } else {
+          setVisible(false);
+          unmountTimer=setTimeout(()=>setMounted(false),320);
+          document.body.style.overflow="";
+        }
+        return ()=>{
+          clearTimeout(unmountTimer);
+          document.body.style.overflow="";
+        };
+      },[open]);
+
+      if(!mounted) return null;
+      return (
+        <div ref={ref} onClick={e=>{ if(e.target===ref.current)onClose(); }}
+          style={{position:"fixed",inset:0,zIndex:200,display:"flex",alignItems:"flex-end",
+            background:`rgba(0,0,0,${visible?".45":"0"})`,transition:"background .3s",willChange:"background"}}>
+          <div style={{width:"100%",maxWidth:600,margin:"0 auto",background:"#fff",
+            borderRadius:"20px 20px 0 0",padding:"0 0 env(safe-area-inset-bottom)",maxHeight:"90vh",overflowY:"auto",
+            transform:visible?"translateY(0)":"translateY(100%)",
+            transition:"transform .32s cubic-bezier(.32,.72,0,1)",willChange:"transform"}}>
+            <div style={{padding:"14px 20px 12px",display:"flex",alignItems:"center",justifyContent:"space-between",
+              position:"sticky",top:0,background:"#fff",zIndex:1,borderBottom:"1px solid #f3f4f6"}}>
+              <div style={{width:36,height:4,background:"#e5e7eb",borderRadius:4,position:"absolute",top:8,left:"50%",transform:"translateX(-50%)"}}/>
+              <span style={{fontWeight:700,fontSize:16,color:"#111",marginTop:6}}>{title}</span>
+              <button onClick={onClose} style={{border:"none",background:"#f3f4f6",color:"#6b7280",borderRadius:8,
+                width:32,height:32,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",
+                justifyContent:"center",marginTop:6,flexShrink:0}}>✕</button>
+            </div>
+            <div style={{padding:"16px 20px 28px"}}>{children}</div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── [F2+F9] Portfolio Selector ───────────────────────────────────────────────
+    const PORTFOLIO_EMOJIS=["💼","🏢","🚀","🏠","📊","🎯","💡","🌱"];
+
+    function PortfolioSelector({ portfolios, activeId, onChange, onAdd, onRename, onDelete }) {
+      const [open,setOpen]   = useState(false);
+      const [mounted,setMounted]=useState(false);
+      const [visible,setVisible]=useState(false);
+      const [renamingId,setRenamingId]=useState(null);
+      const [renameVal,setRenameVal]=useState("");
+
+      useEffect(()=>{
+        let t;
+        if(open){
+          setMounted(true);
+          requestAnimationFrame(()=>requestAnimationFrame(()=>setVisible(true)));
+          document.body.style.overflow="hidden";
+        } else {
+          setVisible(false);
+          t=setTimeout(()=>{ setMounted(false); setRenamingId(null); },320);
+          document.body.style.overflow="";
+        }
+        return()=>{ clearTimeout(t); document.body.style.overflow=""; };
+      },[open]);
+
+      const active = portfolios.find(p=>p.id===activeId);
+      const startRename=(p)=>{ setRenamingId(p.id); setRenameVal(p.name); };
+      const commitRename=()=>{ if(renameVal.trim())onRename(renamingId,renameVal.trim()); setRenamingId(null); };
+
+      return (
+        <>
+          <button onClick={()=>setOpen(true)}
+            style={{border:"1px solid #e5e7eb",borderRadius:10,padding:"6px 12px",fontSize:13,fontWeight:700,
+              color:"#374151",background:"#fff",cursor:"pointer",display:"flex",alignItems:"center",gap:6,
+              maxWidth:155,overflow:"hidden",WebkitTapHighlightColor:"transparent"}}>
+            <span>{active?.emoji||"💼"}</span>
+            <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:0}}>{active?.name||"Portfolio"}</span>
+            <span style={{fontSize:10,color:"#9ca3af",flexShrink:0}}>▾</span>
+          </button>
+
+          {mounted&&(
+            <div onClick={e=>{ if(e.target===e.currentTarget)setOpen(false); }}
+              style={{position:"fixed",inset:0,zIndex:300,display:"flex",alignItems:"flex-end",
+                background:`rgba(0,0,0,${visible?".45":"0"})`,transition:"background .3s",willChange:"background"}}>
+              <div style={{width:"100%",maxWidth:600,margin:"0 auto",background:"#fff",
+                borderRadius:"20px 20px 0 0",padding:"20px 20px calc(env(safe-area-inset-bottom) + 20px)",
+                transform:visible?"translateY(0)":"translateY(100%)",
+                transition:"transform .32s cubic-bezier(.32,.72,0,1)",willChange:"transform"}}>
+
+                <div style={{width:36,height:4,background:"#e5e7eb",borderRadius:4,margin:"0 auto 18px"}}/>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+                  <p style={{...ss.chip,margin:0}}>My Portfolios</p>
+                  <button onClick={()=>setOpen(false)}
+                    style={{border:"none",background:"#f3f4f6",color:"#6b7280",borderRadius:8,width:30,height:30,
+                      cursor:"pointer",fontSize:14,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+                </div>
+
+                {portfolios.map(p=>(
+                  <div key={p.id} style={{marginBottom:8}}>
+                    {renamingId===p.id ? (
+                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                        <input autoFocus value={renameVal} onChange={e=>setRenameVal(e.target.value)}
+                          onKeyDown={e=>{ if(e.key==="Enter")commitRename(); if(e.key==="Escape")setRenamingId(null); }}
+                          style={{...ss.input,flex:1,padding:"10px 12px",fontSize:14}}/>
+                        <button onClick={commitRename}
+                          style={{...ss.btn,background:"#2563eb",color:"#fff",width:"auto",padding:"10px 16px",fontSize:13}}>Save</button>
+                        <button onClick={()=>setRenamingId(null)}
+                          style={{...ss.btn,background:"#f3f4f6",color:"#6b7280",width:"auto",padding:"10px 14px",fontSize:13}}>✕</button>
+                      </div>
+                    ) : (
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <button onClick={()=>{ onChange(p.id); setOpen(false); }}
+                          style={{flex:1,textAlign:"left",border:`2px solid ${p.id===activeId?"#2563eb":"#e5e7eb"}`,
+                            background:p.id===activeId?"#eff6ff":"#fff",borderRadius:12,padding:"12px 14px",
+                            fontSize:14,fontWeight:700,color:p.id===activeId?"#2563eb":"#111",cursor:"pointer",
+                            display:"flex",alignItems:"center",gap:8}}>
+                          <span>{p.emoji||"💼"}</span>
+                          <span style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span>
+                          {p.id===activeId&&<span style={{...ss.tag,background:"#dbeafe",color:"#1d4ed8",flexShrink:0}}>Active</span>}
+                        </button>
+                        <button onClick={()=>startRename(p)}
+                          style={{border:"1px solid #e5e7eb",background:"#fff",color:"#6b7280",borderRadius:8,
+                            width:34,height:34,cursor:"pointer",fontSize:13,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}
+                          title="Rename">✏️</button>
+                        {portfolios.length>1&&(
+                          <button onClick={()=>onDelete(p.id)}
+                            style={{border:"none",background:"#fef2f2",color:"#ef4444",borderRadius:8,
+                              width:34,height:34,cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <button onClick={onAdd}
+                  style={{...ss.btn,background:"#eff6ff",color:"#2563eb",marginTop:12,padding:"12px 0",fontSize:14}}>
+                  + New Portfolio
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      );
+    }
+
+    // ─── FAB ──────────────────────────────────────────────────────────────────────
+    function FAB({ onClick }) {
+      return (
+        <button onClick={onClick}
+          style={{position:"fixed",bottom:76,right:20,zIndex:150,width:56,height:56,borderRadius:28,
+            background:"#2563eb",color:"#fff",border:"none",fontSize:26,
+            boxShadow:"0 4px 16px rgba(37,99,235,.4)",cursor:"pointer",display:"flex",alignItems:"center",
+            justifyContent:"center",willChange:"transform",transition:"transform .15s",
+            WebkitTapHighlightColor:"transparent"}}>+</button>
+      );
+    }
+
+    // ─── Line Item ────────────────────────────────────────────────────────────────
+    function LineItem({ item, sym, fxRate, onDelete, onEdit }) {
+      const d=Number(item.amount)*fxRate;
+      return (
+        <div style={{display:"flex",alignItems:"center",padding:"13px 16px",borderBottom:"1px solid #f3f4f6",gap:12,minHeight:44}}>
+          <div style={{flex:1,minWidth:0}}>
+            <p style={{margin:0,fontSize:14,fontWeight:600,color:"#111",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              {item.isDebt&&<span style={{...ss.tag,background:"#fef2f2",color:"#dc2626",marginRight:5}}>DEBT</span>}
+              {item.name}
+            </p>
+            <p style={{margin:"2px 0 0",fontSize:11,color:"#9ca3af"}}>{fmtN(d*12,sym)}/yr · {fmtN(d/(WPY/MPY),sym)}/wk</p>
+          </div>
+          <button onClick={()=>onEdit(item)}
+            style={{border:"none",background:"none",color:"#374151",cursor:"pointer",fontSize:15,fontWeight:700,
+              minWidth:44,minHeight:44,display:"flex",alignItems:"center",justifyContent:"flex-end"}}>
+            {fmtN(d,sym)}
+          </button>
+          <button onClick={()=>onDelete(item.id)}
+            style={{border:"none",background:"#fef2f2",color:"#ef4444",borderRadius:8,width:36,height:36,
+              cursor:"pointer",fontSize:16,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+        </div>
+      );
+    }
+
+    // ─── Category Section ─────────────────────────────────────────────────────────
+    function CatSection({ catKey, items, sym, fxRate, computed, onDelete, onEditItem, onOpenAdd, collapsed, onToggle }) {
+      const meta=CATS[catKey]; const totalMo=computed.catMonthly[catKey];
+      return (
+        <div style={{...ss.card,marginBottom:10}}>
+          <button onClick={onToggle}
+            style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 16px",
+              border:"none",background:"none",cursor:"pointer",width:"100%",minHeight:56,textAlign:"left"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:20}}>{meta.icon}</span>
+              <div>
+                <p style={{margin:0,fontWeight:700,fontSize:14,color:"#111"}}>{meta.label}</p>
+                <p style={{margin:0,fontSize:11,color:"#9ca3af"}}>{items.length} item{items.length!==1?"s":""}</p>
+              </div>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <div style={{textAlign:"right"}}>
+                <p style={{margin:0,fontWeight:800,fontSize:15,color:meta.color}}>{fmtN(totalMo,sym)}</p>
+                <p style={{margin:0,fontSize:10,color:"#9ca3af"}}>/month</p>
+              </div>
+              <span style={{fontSize:12,color:"#9ca3af",display:"block",
+                transition:"transform .22s",transform:collapsed?"rotate(0deg)":"rotate(180deg)"}}>▼</span>
+            </div>
+          </button>
+          {!collapsed&&(
+            <>
+              {items.length===0&&<p style={{padding:"12px 16px",margin:0,fontSize:13,color:"#9ca3af",fontStyle:"italic"}}>No items yet.</p>}
+              {items.map(item=>(
+                <LineItem key={item.id} item={item} sym={sym} fxRate={fxRate} onDelete={onDelete} onEdit={onEditItem}/>
+              ))}
+              <button onClick={()=>onOpenAdd(catKey)}
+                style={{display:"flex",alignItems:"center",gap:8,padding:"12px 16px",border:"none",
+                  background:"#f8faff",color:meta.color,cursor:"pointer",width:"100%",
+                  fontSize:13,fontWeight:700,borderTop:"1px solid #f3f4f6"}}>
+                <span style={{fontSize:18}}>+</span> Add to {meta.label}
+              </button>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ─── Goal Card ────────────────────────────────────────────────────────────────
+    function GoalCard({ goal, sym, fxRate, onEdit }) {
+      const pct=Math.min(goal.target>0?(goal.saved/goal.target)*100:0,100);
+      const d=n=>fmtN(n*fxRate,sym);
+      return (
+        <div style={{...ss.card,padding:16,marginBottom:10}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:22}}>{goal.icon}</span>
+              <div>
+                <p style={{margin:0,fontWeight:700,fontSize:14,color:"#111"}}>{goal.name}</p>
+                <p style={{margin:0,fontSize:11,color:"#9ca3af"}}>{d(goal.saved)} of {d(goal.target)}</p>
+              </div>
+            </div>
+            <button onClick={()=>onEdit(goal)}
+              style={{border:"1px solid #e5e7eb",background:"#fff",borderRadius:8,padding:"6px 12px",
+                fontSize:12,fontWeight:600,color:"#6b7280",cursor:"pointer",minWidth:44,minHeight:44}}>Edit</button>
+          </div>
+          <div style={{background:"#f3f4f6",borderRadius:99,height:8,overflow:"hidden"}}>
+            <div style={{width:`${pct}%`,background:goal.color,height:"100%",borderRadius:99,transition:"width .6s ease"}}/>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:5}}>
+            <span style={{fontSize:11,color:"#9ca3af"}}>{pct.toFixed(0)}% reached</span>
+            <span style={{fontSize:11,color:"#9ca3af"}}>{d(Math.max(goal.target-goal.saved,0))} remaining</span>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── BI Metric Card ───────────────────────────────────────────────────────────
+    function BICard({ label, value, unit, icon, desc, benchmark }) {
+      const {color,bg,status}=useMemo(()=>{
+        if(!benchmark) return {color:"#6b7280",bg:"#f9fafb",status:"—"};
+        const {greenMin,greenMax,amberMin,amberMax}=benchmark;
+        if(value>=greenMin&&value<=greenMax) return {color:"#16a34a",bg:"#f0fdf4",status:"Healthy ✅"};
+        if(value>=amberMin&&value<=amberMax) return {color:"#d97706",bg:"#fffbeb",status:"Warning ⚠️"};
+        return {color:"#dc2626",bg:"#fef2f2",status:"Risk 🔴"};
+      },[value,benchmark]);
+      const display=!isFinite(value)||isNaN(value)?"—":`${value.toFixed(1)}${unit}`;
+      return (
+        <div style={{...ss.card,padding:"14px 15px",background:bg,border:`1px solid ${color}22`}}>
+          <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:4}}>
+            <p style={{...ss.chip,margin:0,fontSize:9}}>{label}</p>
+            <span style={{fontSize:16}}>{icon}</span>
+          </div>
+          <p style={{margin:"4px 0 2px",fontSize:22,fontWeight:800,color,letterSpacing:"-0.02em"}}>{display}</p>
+          <p style={{margin:0,fontSize:10,fontWeight:700,color}}>{status}</p>
+          <p style={{margin:"4px 0 0",fontSize:10,color:"#9ca3af",lineHeight:1.4}}>{desc}</p>
+        </div>
+      );
+    }
+
+    // ─── Financial Health Dashboard ───────────────────────────────────────────────
+    function FinHealthDashboard({ computed, sym, data, onDataChange }) {
+      const {opMargin,netProfitMargin,financialRunway,dtiRatio}=computed;
+      return (
+        <div style={{marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",margin:"0 2px 10px"}}>
+            <p style={{...ss.chip,margin:0}}>📊 Financial Health (BI)</p>
+            <span style={{...ss.tag,background:"#eff6ff",color:"#2563eb"}}>Live KPIs</span>
+          </div>
+          <div style={{...ss.card,padding:"10px 14px",marginBottom:10,display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:18}}>🏦</span>
+            <div style={{flex:1}}>
+              <p style={{...ss.chip,margin:"0 0 2px",fontSize:9}}>Savings Balance ({sym}) — used for Runway</p>
+              <input type="number" value={data.savingsBalance||0}
+                onChange={e=>onDataChange({...data,savingsBalance:Number(e.target.value)})}
+                placeholder="0.00"
+                style={{...ss.input,fontSize:14,fontWeight:700,padding:"6px 10px",color:"#16a34a"}}/>
+            </div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <BICard label="Personal Operating Margin" value={opMargin} unit="%" icon="⚙️"
+              desc="(Gross - PreTax - Fixed) / Gross" benchmark={{greenMin:30,greenMax:100,amberMin:15,amberMax:29.99}}/>
+            <BICard label="Net Profit Margin" value={netProfitMargin} unit="%" icon="💰"
+              desc="(Savings + Investments) / Gross" benchmark={{greenMin:20,greenMax:100,amberMin:10,amberMax:19.99}}/>
+            <BICard label="Financial Runway" value={financialRunway} unit=" mo" icon="🛟"
+              desc="Savings Balance / Monthly Expenses" benchmark={{greenMin:6,greenMax:9999,amberMin:3,amberMax:5.99}}/>
+            <BICard label="Debt-to-Income Ratio" value={dtiRatio} unit="%" icon="📉"
+              desc="Monthly Debt / Gross Monthly" benchmark={{greenMin:0,greenMax:35,amberMin:35.01,amberMax:49.99}}/>
+          </div>
+          <div style={{display:"flex",gap:12,marginTop:8,padding:"8px 12px",background:"#f8fafc",borderRadius:10,border:"1px solid #e9ecef"}}>
+            {[["#16a34a","Healthy"],["#d97706","Warning"],["#dc2626","High Risk"]].map(([c,l])=>(
+              <div key={l} style={{display:"flex",alignItems:"center",gap:5}}>
+                <div style={{width:8,height:8,borderRadius:4,background:c}}/>
+                <span style={{fontSize:10,color:"#6b7280"}}>{l}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Snapshot Banner ──────────────────────────────────────────────────────────
+    function SnapshotBanner({ history, onTakeSnapshot }) {
+      const last=history[history.length-1];
+      return (
+        <div style={{...ss.card,padding:"10px 14px",marginBottom:14,display:"flex",alignItems:"center",
+          justifyContent:"space-between",background:"#fafafa",border:"1px dashed #d1d5db"}}>
+          <div style={{flex:1,minWidth:0}}>
+            <p style={{...ss.chip,margin:"0 0 2px"}}>📅 Monthly Snapshot</p>
+            <p style={{margin:0,fontSize:12,color:"#6b7280",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              {last
+                ? `Last: ${last.month} — OP ${last.opMargin?.toFixed(1)}% · DTI ${last.dtiRatio?.toFixed(1)}%`
+                : "No snapshots yet — capture month-end KPIs"}
+            </p>
+          </div>
+          <button onClick={onTakeSnapshot}
+            style={{border:"1px solid #e5e7eb",background:"#fff",borderRadius:10,padding:"8px 14px",
+              fontSize:12,fontWeight:700,color:"#374151",cursor:"pointer",flexShrink:0,marginLeft:10}}>
+            + Capture
+          </button>
+        </div>
+      );
+    }
+
+    // ─── [F10] Debt Amortizer ─────────────────────────────────────────────────────
+    function DebtAmortizer({ items, sym, fxRate }) {
+      const debts=useMemo(()=>
+        [...(items.fixedCosts||[]),...(items.creditCards||[])].filter(i=>i.isDebt&&Number(i.balance)>0),
+      [items]);
+      const [extras,setExtras]=useState({});
+
+      if(!debts.length) return null;
+      return (
+        <div style={{...ss.card,padding:16,marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+            <p style={{...ss.chip,margin:0}}>⚡ Debt Payoff Accelerator</p>
+            <span style={{...ss.tag,background:"#fef2f2",color:"#dc2626"}}>Amortization</span>
+          </div>
+          {debts.map(debt=>{
+            const bal   = Number(debt.balance||0);
+            const min   = Number(debt.amount||0);
+            const rate  = Number(debt.rate||0);
+            const extra = Number(extras[debt.id]||0)/fxRate;
+            const base  = amortize(bal,rate,min);
+            const accel = extra>0?amortize(bal,rate,min,extra):null;
+            const saved    = base&&accel&&!base.unresolvable&&!accel.unresolvable ? base.months-accel.months : 0;
+            const intSaved = base&&accel&&!base.unresolvable&&!accel.unresolvable ? base.totalInt-accel.totalInt : 0;
+            return (
+              <div key={debt.id} style={{borderBottom:"1px solid #f3f4f6",paddingBottom:12,marginBottom:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <p style={{margin:0,fontWeight:700,fontSize:13,color:"#111"}}>{debt.name}</p>
+                  <span style={{fontSize:11,color:"#6b7280",fontWeight:600}}>{rate}% APR</span>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                  <div style={{background:"#f8fafc",borderRadius:8,padding:"8px 10px"}}>
+                    <p style={{...ss.chip,margin:"0 0 2px",fontSize:8}}>Balance</p>
+                    <p style={{margin:0,fontWeight:800,fontSize:13,color:"#dc2626"}}>{fmtN(bal*fxRate,sym)}</p>
+                  </div>
+                  <div style={{background:"#f8fafc",borderRadius:8,padding:"8px 10px"}}>
+                    <p style={{...ss.chip,margin:"0 0 2px",fontSize:8}}>Min Payment</p>
+                    <p style={{margin:0,fontWeight:800,fontSize:13,color:"#374151"}}>{fmtN(min*fxRate,sym)}/mo</p>
+                  </div>
+                </div>
+                {base&&(
+                  base.unresolvable ? (
+                    <div style={{background:"#fef2f2",borderRadius:8,padding:"8px 10px",marginBottom:8}}>
+                      <p style={{margin:0,fontSize:11,color:"#dc2626",fontWeight:700}}>
+                        ⚠️ Min payment doesn't cover interest — debt growing. Increase payment.
+                      </p>
+                    </div>
+                  ) : (
+                    <div style={{background:"#fffbeb",borderRadius:8,padding:"8px 10px",marginBottom:8}}>
+                      <p style={{margin:0,fontSize:11,color:"#92400e"}}>
+                        At min payment: <b>{base.months} months</b> ({(base.months/12).toFixed(1)} yrs) · {fmtN(base.totalInt*fxRate,sym)} interest total
+                      </p>
+                    </div>
+                  )
+                )}
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <input type="number" placeholder={`Extra/mo (${sym})`} value={extras[debt.id]||""}
+                    onChange={e=>setExtras(p=>({...p,[debt.id]:e.target.value}))}
+                    style={{...ss.input,fontSize:13,padding:"9px 12px",flex:1}}/>
+                </div>
+                {accel&&saved>0&&!accel.unresolvable&&(
+                  <div style={{background:"#f0fdf4",borderRadius:8,padding:"8px 10px",marginTop:8,border:"1px solid #bbf7d0"}}>
+                    <p style={{margin:0,fontSize:11,color:"#15803d",fontWeight:700}}>
+                      ⚡ {saved} months faster! Save {fmtN(intSaved*fxRate,sym)} in interest.
+                    </p>
+                    <p style={{margin:"3px 0 0",fontSize:11,color:"#16a34a"}}>
+                      New payoff: <b>{accel.months} months</b> ({(accel.months/12).toFixed(1)} yrs)
+                    </p>
+                  </div>
+                )}
+                {accel&&accel.unresolvable&&(
+                  <div style={{background:"#fef2f2",borderRadius:8,padding:"8px 10px",marginTop:8}}>
+                    <p style={{margin:0,fontSize:11,color:"#dc2626"}}>Extra payment still can't cover monthly interest.</p>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <p style={{...ss.chip,margin:0,fontSize:9,textAlign:"center",color:"#d1d5db"}}>
+            Mark items isDebt + set balance &amp; APR to activate
+          </p>
+        </div>
+      );
+    }
+
+    // ─── [F3] Lifestyle Dashboard ─────────────────────────────────────────────────
+    function LifestyleDashboard({ memos, onMemosChange }) {
+      const [now,setNow]=useState(new Date());
+      useEffect(()=>{ const t=setInterval(()=>setNow(new Date()),30000); return()=>clearInterval(t); },[]);
+
+      const [memo,setMemo]=useState(memos||"");
+      useEffect(()=>setMemo(memos||""),[memos]);
+      const handleMemo=e=>{ setMemo(e.target.value); onMemosChange(e.target.value); };
+
+      const hour=now.getHours();
+      const greeting=hour<12?"Good Morning ☀️":hour<17?"Good Afternoon 🌤️":"Good Evening 🌙";
+      const dateStr=now.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"});
+      const timeStr=now.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"});
+      const seed=now.getFullYear()*1000+now.getMonth()*31+now.getDate();
+      const weather=WEATHER[seed%WEATHER.length];
+      const quote=QUOTES[seed%QUOTES.length];
+
+      return (
+        <div style={{marginBottom:16}}>
+          <div style={{...ss.card,padding:"16px 18px",marginBottom:10,background:"linear-gradient(135deg,#0f172a,#1e3a5f)",border:"none"}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <div>
+                <p style={{margin:0,fontSize:18,fontWeight:800,color:"#fff"}}>{greeting}</p>
+                <p style={{margin:"2px 0 0",fontSize:12,color:"rgba(255,255,255,.55)"}}>{dateStr}</p>
+              </div>
+              <p style={{margin:0,fontSize:26,fontWeight:800,color:"#fff",letterSpacing:"-0.02em",fontVariantNumeric:"tabular-nums"}}>{timeStr}</p>
+            </div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1.4fr",gap:10,marginBottom:10}}>
+            <div style={{...ss.card,padding:"14px 16px",position:"relative",overflow:"hidden"}}>
+              <div style={{position:"absolute",top:-10,right:-10,fontSize:52,opacity:.06,pointerEvents:"none"}}>{weather.icon}</div>
+              <p style={{...ss.chip,margin:"0 0 8px"}}>Weather</p>
+              <p style={{margin:0,fontSize:28,lineHeight:1}}>{weather.icon}</p>
+              <p style={{margin:"6px 0 2px",fontSize:20,fontWeight:800,color:"#111"}}>{weather.temp}°C</p>
+              <p style={{margin:0,fontSize:12,color:"#6b7280"}}>{weather.desc}</p>
+              <p style={{margin:"4px 0 0",fontSize:10,color:"#9ca3af",fontStyle:"italic"}}>API ready</p>
+            </div>
+            <div style={{...ss.card,padding:"14px 16px",display:"flex",flexDirection:"column"}}>
+              <p style={{...ss.chip,margin:"0 0 8px"}}>📝 Daily Reminders</p>
+              <textarea value={memo} onChange={handleMemo}
+                placeholder={"• Morning workout\n• Review budget\n• Call the bank"}
+                style={{flex:1,border:"1px solid #e5e7eb",borderRadius:8,padding:"8px 10px",fontSize:12,
+                  fontFamily:"inherit",resize:"none",outline:"none",color:"#374151",lineHeight:1.6,minHeight:80,background:"#fafafa"}}/>
+            </div>
+          </div>
+          <div style={{...ss.card,padding:"12px 16px",border:"1px solid #dbeafe",background:"#eff6ff"}}>
+            <p style={{...ss.chip,margin:"0 0 4px",color:"#3b82f6"}}>💬 Daily Insight</p>
+            <p style={{margin:0,fontSize:13,color:"#1e40af",lineHeight:1.5,fontStyle:"italic"}}>{quote}</p>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Dashboard Page ───────────────────────────────────────────────────────────
+    function DashboardPage({ computed, sym, fxRate, goals, onEditGoal, onAddGoal,
+      memos, onMemosChange, data, onDataChange, history, onTakeSnapshot }) {
+      const {grossMonth,netMonth,netWeek,guiltFreeMo,guiltFreeWk,savingsRate,postTaxMo,savInvMo,preTaxMo}=computed;
+      return (
+        <div>
+          <LifestyleDashboard memos={memos} onMemosChange={onMemosChange}/>
+          <div style={{...ss.card,padding:"20px 18px",marginBottom:14,background:"linear-gradient(135deg,#1d4ed8,#4f46e5)"}}>
+            <p style={{margin:"0 0 4px",...ss.chip,color:"rgba(255,255,255,.6)"}}>Guilt-Free Spending</p>
+            <p style={{margin:"0 0 2px",fontSize:36,fontWeight:800,color:"#fff",letterSpacing:"-0.02em"}}>
+              {fmtN(guiltFreeMo,sym)}<span style={{fontSize:14,fontWeight:500,opacity:.7}}>/mo</span>
+            </p>
+            <p style={{margin:0,fontSize:13,color:"rgba(255,255,255,.6)"}}>
+              {fmtN(guiltFreeWk,sym)}/wk · Savings rate {(savingsRate*100).toFixed(1)}%
+            </p>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+            {[{label:"Gross/mo",val:grossMonth,color:"#6366f1"},{label:"Net/mo",val:netMonth,color:"#2563eb"},
+              {label:"Pre-Tax/mo",val:preTaxMo,color:"#8b5cf6"},{label:"Expenses/mo",val:postTaxMo,color:"#db2777"},
+              {label:"Saved/mo",val:savInvMo,color:"#16a34a"},{label:"Net/wk",val:netWeek,color:"#0891b2"},
+            ].map(({label,val,color})=>(
+              <div key={label} style={{...ss.card,padding:"13px 14px"}}>
+                <p style={{margin:0,...ss.chip}}>{label}</p>
+                <p style={{margin:"4px 0 0",fontSize:17,fontWeight:800,color}}>{fmtN(val,sym)}</p>
+              </div>
+            ))}
+          </div>
+          <FinHealthDashboard computed={computed} sym={sym} data={data} onDataChange={onDataChange}/>
+          <SnapshotBanner history={history} onTakeSnapshot={onTakeSnapshot}/>
+          <DebtAmortizer items={data} sym={sym} fxRate={fxRate}/>
+          <div style={{...ss.card,padding:16,marginBottom:14}}>
+            <p style={{...ss.chip,margin:"0 0 12px"}}>Monthly Breakdown</p>
+            {Object.entries(computed.catMonthly).map(([k,v])=>{
+              const pct=Math.min((v/(grossMonth||1))*100,100);
+              return (
+                <div key={k} style={{marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}>
+                    <span style={{color:"#374151"}}>{CATS[k].icon} {CATS[k].label}</span>
+                    <span style={{fontWeight:700,color:CATS[k].color}}>{fmtN(v,sym)}</span>
+                  </div>
+                  <div style={{background:"#f3f4f6",borderRadius:4,height:5}}>
+                    <div style={{width:`${pct}%`,background:CATS[k].color,height:"100%",borderRadius:4,transition:"width .5s ease"}}/>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",margin:"0 2px 10px"}}>
+            <p style={{margin:0,...ss.chip}}>Financial Goals</p>
+            <button onClick={onAddGoal}
+              style={{border:"1px solid #e5e7eb",background:"#fff",borderRadius:8,padding:"6px 14px",
+                fontSize:12,fontWeight:700,color:"#2563eb",cursor:"pointer"}}>+ Goal</button>
+          </div>
+          {goals.map(g=><GoalCard key={g.id} goal={g} sym={sym} fxRate={1} onEdit={onEditGoal}/>)}
+          {goals.length===0&&<p style={{textAlign:"center",color:"#9ca3af",fontSize:13,padding:"20px 0"}}>No goals yet — add one above.</p>}
+        </div>
+      );
+    }
+
+    // ─── Budget Page ──────────────────────────────────────────────────────────────
+    function BudgetPage({ data, computed, sym, fxRate, onDelete, onEditItem, onOpenAdd, collapsed, onToggle, onChangeGross }) {
+      const groups=[
+        {label:"PRE-TAX",                keys:["govDeductions","otherDeductions","pretaxDeductions"]},
+        {label:"POST-TAX",               keys:["fixedCosts","subscriptions","creditCards"]},
+        {label:"SAVINGS & INVESTMENTS",  keys:["savings","investments"]},
+      ];
+      return (
+        <div>
+          <div style={{...ss.card,padding:"14px 16px",marginBottom:14}}>
+            <p style={{margin:"0 0 8px",...ss.chip}}>Annual Gross Income</p>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:20}}>💰</span>
+              <input type="number" value={data.grossIncome.year} onChange={e=>onChangeGross(e.target.value)}
+                style={{...ss.input,fontWeight:800,fontSize:20,color:"#16a34a",border:"none",padding:"0",flex:1}}/>
+            </div>
+            <div style={{display:"flex",gap:16,marginTop:6}}>
+              {[["mo",computed.grossMonth],["wk",computed.grossMonth/(WPY/MPY)]].map(([l,v])=>(
+                <span key={l} style={{fontSize:12,color:"#9ca3af"}}>{l}: <b style={{color:"#374151"}}>{fmtN(v,sym)}</b></span>
+              ))}
+            </div>
+          </div>
+          {groups.map(({label,keys})=>(
+            <div key={label}>
+              <p style={{...ss.chip,margin:"14px 4px 8px"}}>{label}</p>
+              {keys.map(k=>(
+                <CatSection key={k} catKey={k} items={data[k]||[]} sym={sym} fxRate={fxRate}
+                  computed={computed} onDelete={onDelete} onEditItem={onEditItem}
+                  onOpenAdd={onOpenAdd} collapsed={!!collapsed[k]} onToggle={()=>onToggle(k)}/>
+              ))}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ─── Settings Page ────────────────────────────────────────────────────────────
+    function SettingsPage({ currency, setCurrency, user, onSignOut, onReset, onExport, history, onClearHistory }) {
+      return (
+        <div>
+          <div style={{...ss.card,padding:16,marginBottom:12}}>
+            <p style={{...ss.chip,margin:"0 0 10px"}}>Account</p>
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+              <div style={{width:44,height:44,borderRadius:22,background:"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>👤</div>
+              <div>
+                <p style={{margin:0,fontWeight:700,fontSize:14,color:"#111"}}>{user?.displayName||"Guest"}</p>
+                <p style={{margin:0,fontSize:12,color:"#9ca3af"}}>{user?.email}</p>
+              </div>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:"#f0fdf4",borderRadius:8,marginBottom:10}}>
+              <span style={{fontSize:16}}>☁️</span>
+              <div>
+                <p style={{margin:0,fontSize:13,fontWeight:700,color:"#16a34a"}}>Cloud Sync Ready</p>
+                <p style={{margin:0,fontSize:11,color:"#6b7280"}}>Swap db.* layer for Firebase/Supabase</p>
+              </div>
+            </div>
+            <button onClick={onSignOut} style={{...ss.btn,background:"#fef2f2",color:"#ef4444",padding:"12px 0",fontSize:14}}>Sign Out</button>
+          </div>
+          <div style={{...ss.card,padding:16,marginBottom:12}}>
+            <p style={{...ss.chip,margin:"0 0 10px"}}>Currency &amp; FX</p>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {Object.entries(FX_SYMBOLS).map(([code,s])=>(
+                <button key={code} onClick={()=>setCurrency(code)}
+                  style={{padding:"12px 0",borderRadius:12,border:`2px solid ${currency===code?"#2563eb":"#e5e7eb"}`,
+                    background:currency===code?"#eff6ff":"#fff",color:currency===code?"#2563eb":"#6b7280",fontWeight:700,cursor:"pointer",fontSize:14}}>
+                  {s} {code}
+                  <span style={{display:"block",fontSize:10,fontWeight:400,color:"#9ca3af"}}>×{FX_RATES[code].toFixed(2)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div style={{...ss.card,padding:16,marginBottom:12}}>
+            <p style={{...ss.chip,margin:"0 0 10px"}}>Historical Snapshots</p>
+            <p style={{margin:"0 0 10px",fontSize:12,color:"#6b7280"}}>{history.length} snapshot{history.length!==1?"s":""} stored for this portfolio</p>
+            {history.length>0&&(
+              <div style={{maxHeight:140,overflowY:"auto",marginBottom:8}}>
+                {[...history].reverse().map(h=>(
+                  <div key={h.id} style={{display:"flex",justifyContent:"space-between",padding:"7px 0",borderBottom:"1px solid #f3f4f6",fontSize:11}}>
+                    <span style={{color:"#374151",fontWeight:600}}>{h.month}</span>
+                    <span style={{color:"#6b7280"}}>OP {h.opMargin?.toFixed(1)}% · DTI {h.dtiRatio?.toFixed(1)}% · SR {h.savingsRate?.toFixed(1)}%</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button onClick={onClearHistory} style={{...ss.btn,background:"#fef2f2",color:"#ef4444",fontSize:13,padding:"10px 0"}}>Clear Snapshot History</button>
+          </div>
+          <div style={{...ss.card,padding:16}}>
+            <p style={{...ss.chip,margin:"0 0 10px"}}>Data</p>
+            <button onClick={onExport} style={{...ss.btn,background:"#eff6ff",color:"#2563eb",marginBottom:8,fontSize:14}}>↓ Export CSV</button>
+            <button onClick={onReset}  style={{...ss.btn,background:"#fef2f2",color:"#ef4444",fontSize:14}}>Reset Portfolio to Defaults</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Auth Screen ──────────────────────────────────────────────────────────────
+    function AuthScreen({ onAuth }) {
+      const [email,setEmail]=useState(""); const [pass,setPass]=useState(""); const [mode,setMode]=useState("login");
+      return (
+        <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"#f8fafc",padding:24,fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+          <div style={{...ss.card,padding:28,width:"100%",maxWidth:380}}>
+            <p style={{margin:"0 0 4px",fontWeight:800,fontSize:22,color:"#111"}}>💼 FinTrack</p>
+            <p style={{margin:"0 0 24px",...ss.chip}}>{mode==="login"?"Sign in to your account":"Create account"}</p>
+            <input placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} style={{...ss.input,marginBottom:10}}/>
+            <input placeholder="Password" type="password" value={pass} onChange={e=>setPass(e.target.value)} style={{...ss.input,marginBottom:16}}/>
+            <button onClick={()=>{ if(email.trim())onAuth(email.trim()); }}
+              style={{...ss.btn,background:"#2563eb",color:"#fff",marginBottom:12}}>{mode==="login"?"Sign In":"Create Account"}</button>
+            <button onClick={()=>setMode(m=>m==="login"?"register":"login")}
+              style={{...ss.btn,background:"#f3f4f6",color:"#6b7280",fontSize:13,padding:"10px 0"}}>
+              {mode==="login"?"No account? Register →":"Have account? Sign In →"}
+            </button>
+            <button onClick={()=>onAuth("guest@local")}
+              style={{...ss.btn,background:"none",color:"#9ca3af",fontSize:12,padding:"8px 0",marginTop:4}}>Continue as Guest</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── [F4] Add/Edit Item Sheet ─────────────────────────────────────────────────
+    function AddItemSheet({ open, onClose, editItem, defaultCat, onSubmit, onDelete, sym, fxRate }) {
+      const [name,setName]     = useState("");
+      const [amount,setAmount] = useState("");
+      const [cat,setCat]       = useState(defaultCat||"fixedCosts");
+      const [isDebt,setIsDebt] = useState(false);
+      const [balance,setBalance]=useState("");
+      const [rate,setRate]     = useState("");
+
+      useEffect(()=>{
+        if(open){
+          setName(editItem?.name||"");
+          setAmount(editItem?(Number(editItem.amount)*fxRate).toFixed(2):"");
+          setCat(defaultCat||editItem?.category||"fixedCosts");
+          setIsDebt(!!editItem?.isDebt);
+          setBalance(editItem?.balance!=null?String(editItem.balance):"");
+          setRate(editItem?.rate!=null?String(editItem.rate):"");
+        }
+      },[open]);
+
+      const color=CATS[cat]?.color||"#2563eb";
+      const submit=()=>{
+        if(!name.trim()||!amount) return;
+        const payload={
+          name: name.trim(),
+          amount: parseFloat(amount)/fxRate,
+          ...(isDebt&&{ isDebt:true, balance:Number(balance)||0, rate:Number(rate)||0 }),
+          ...(!isDebt&&editItem?.isDebt&&{ isDebt:false, balance:0, rate:0 }),
+        };
+        onSubmit(cat, payload);
+      };
+
+      return (
+        <BottomSheet open={open} onClose={onClose} title={editItem?"Edit Item":"Add Item"}>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div>
+              <p style={{...ss.chip,marginBottom:6}}>Category</p>
+              <select value={cat} onChange={e=>setCat(e.target.value)} style={{...ss.input,color:"#111",fontWeight:600}}>
+                {Object.entries(CATS).map(([k,v])=><option key={k} value={k}>{v.icon} {v.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <p style={{...ss.chip,marginBottom:6}}>Item Name</p>
+              <input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Netflix, Rent..." style={ss.input}/>
+            </div>
+            <div>
+              <p style={{...ss.chip,marginBottom:6}}>Monthly Amount ({sym})</p>
+              <input type="number" value={amount} onChange={e=>setAmount(e.target.value)}
+                placeholder="0.00" style={{...ss.input,fontSize:22,fontWeight:800,color}}/>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",background:"#f8fafc",borderRadius:10,cursor:"pointer"}}
+              onClick={()=>setIsDebt(v=>!v)}>
+              <div style={{width:20,height:20,borderRadius:5,border:`2px solid ${isDebt?"#2563eb":"#d1d5db"}`,
+                background:isDebt?"#2563eb":"#fff",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                {isDebt&&<span style={{color:"#fff",fontSize:13,fontWeight:900}}>✓</span>}
+              </div>
+              <span style={{fontSize:13,fontWeight:600,color:"#374151",userSelect:"none"}}>Track as Debt (enables amortization)</span>
+            </div>
+            {isDebt&&(
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <div>
+                  <p style={{...ss.chip,marginBottom:6}}>Outstanding Balance</p>
+                  <input type="number" value={balance} onChange={e=>setBalance(e.target.value)} placeholder="0.00" style={ss.input}/>
+                </div>
+                <div>
+                  <p style={{...ss.chip,marginBottom:6}}>Annual Rate (%)</p>
+                  <input type="number" value={rate} onChange={e=>setRate(e.target.value)} placeholder="e.g. 19.99" style={ss.input}/>
+                </div>
+              </div>
+            )}
+            <button onClick={submit} style={{...ss.btn,background:color,color:"#fff",marginTop:4}}>
+              {editItem?"Save Changes":"Add Item"}
+            </button>
+            {onDelete&&(
+              <button onClick={onDelete} style={{...ss.btn,background:"#fef2f2",color:"#ef4444",padding:"12px 0"}}>
+                Delete Item
+              </button>
+            )}
+          </div>
+        </BottomSheet>
+      );
+    }
+
+    // ─── [F8] Goal Sheet ──────────────────────────────────────────────────────────
+    const GOAL_ICONS  = ["🎯","🏠","✈️","🚗","💍","📚","🛡️","💻","🎓","🏋️"];
+    const GOAL_COLORS = ["#6366f1","#2563eb","#0891b2","#16a34a","#d97706","#db2777","#7c3aed","#ea580c"];
+
+    function GoalSheet({ open, onClose, editGoal, onSubmit, onDelete, sym, fxRate }) {
+      const blankRef=useRef({id:uid(),name:"",target:0,saved:0,icon:"🎯",color:"#6366f1"});
+      const [g,setG]=useState(blankRef.current);
+
+      useEffect(()=>{
+        if(open){
+          if(editGoal){
+            setG({...editGoal,target:editGoal.target*fxRate,saved:editGoal.saved*fxRate});
+          } else {
+            blankRef.current={id:uid(),name:"",target:0,saved:0,icon:"🎯",color:"#6366f1"};
+            setG(blankRef.current);
+          }
+        }
+      },[open]);
+
+      const upd=(k,v)=>setG(p=>({...p,[k]:v}));
+      const submit=()=>{ if(!g.name.trim()) return; onSubmit({...g,target:Number(g.target)/fxRate,saved:Number(g.saved)/fxRate}); };
+
+      return (
+        <BottomSheet open={open} onClose={onClose} title={editGoal?"Edit Goal":"New Goal"}>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            <div>
+              <p style={{...ss.chip,marginBottom:6}}>Goal Name</p>
+              <input value={g.name} onChange={e=>upd("name",e.target.value)} placeholder="e.g. Emergency Fund..." style={ss.input}/>
+            </div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <div style={{flex:1}}>
+                <p style={{...ss.chip,marginBottom:6}}>Target ({sym})</p>
+                <input type="number" value={g.target} onChange={e=>upd("target",e.target.value)} style={ss.input}/>
+              </div>
+              <div style={{flex:1}}>
+                <p style={{...ss.chip,marginBottom:6}}>Saved ({sym})</p>
+                <input type="number" value={g.saved} onChange={e=>upd("saved",e.target.value)} style={ss.input}/>
+              </div>
+            </div>
+            <div>
+              <p style={{...ss.chip,marginBottom:8}}>Icon</p>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {GOAL_ICONS.map(ic=>(
+                  <button key={ic} onClick={()=>upd("icon",ic)}
+                    style={{fontSize:22,width:44,height:44,borderRadius:10,cursor:"pointer",
+                      border:`2px solid ${g.icon===ic?"#2563eb":"#e5e7eb"}`,
+                      background:g.icon===ic?"#eff6ff":"#fff"}}>{ic}</button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <p style={{...ss.chip,marginBottom:8}}>Color</p>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {GOAL_COLORS.map(c=>(
+                  <button key={c} onClick={()=>upd("color",c)}
+                    style={{width:36,height:36,borderRadius:18,background:c,cursor:"pointer",
+                      border:`3px solid ${g.color===c?"#111":"transparent"}`}}/>
+                ))}
+              </div>
+            </div>
+            <button onClick={submit} style={{...ss.btn,background:g.color||"#2563eb",color:"#fff",marginTop:4}}>
+              {editGoal?"Save Goal":"Add Goal"}
+            </button>
+            {onDelete&&(
+              <button onClick={onDelete} style={{...ss.btn,background:"#fef2f2",color:"#ef4444",padding:"12px 0"}}>
+                Delete Goal
+              </button>
+            )}
+          </div>
+        </BottomSheet>
+      );
+    }
+
+    // ─── Root App ─────────────────────────────────────────────────────────────────
+    const NAV=[
+      {id:"dashboard",icon:"📊",label:"Dashboard"},
+      {id:"budget",   icon:"📂",label:"Budget"},
+      {id:"settings", icon:"⚙️",label:"Settings"},
+    ];
+
+    function App() {
+      const { user, signIn, signOut, loading } = useAuth();
+
+      const [portfolios, setPortfolios] = useState(()=>{
+        const s=db.load(); if(s?.portfolios) return s.portfolios;
+        const id=uid(); return [{id,name:"Personal Budget",emoji:"💼"}];
+      });
+      const [activePortfolioId, setActivePortfolioId] = useState(()=>{
+        const s=db.load();
+        const saved=s?.activePortfolioId;
+        if(saved&&(s?.portfolios||[]).find(p=>p.id===saved)) return saved;
+        return (s?.portfolios||[])[0]?.id||portfolios[0]?.id;
+      });
+      const [portfolioData, setPortfolioData] = useState(()=>{
+        const s=db.load();
+        if(s?.portfolioData) return s.portfolioData;
+        const id=portfolios[0]?.id;
+        return {[id]:{data:makeDefaultData(),goals:makeDefaultGoals(),memos:""}};
+      });
+
+      const [history,  setHistory]  = useState(()=>{ const s=db.load(); return s?.history||EMPTY_HISTORY; });
+      const [currency, setCurrency] = useState(()=>{ const s=db.load(); return s?.currency||"USD"; });
+      const [page,     setPage]     = useState("dashboard");
+      const [animating,setAnimating]= useState(false);
+      const [collapsed,setCollapsed]= useState({});
+      const [fab,      setFab]      = useState({open:false,cat:null,editItem:null,editGoal:null,mode:null});
+
+      const pData = useMemo(()=>
+        portfolioData[activePortfolioId]||{data:makeDefaultData(),goals:makeDefaultGoals(),memos:""},
+      [portfolioData,activePortfolioId]);
+      const {data,goals,memos} = pData;
+
+      const setPData=useCallback((updater)=>{
+        setPortfolioData(prev=>{
+          const cur=prev[activePortfolioId]||{data:makeDefaultData(),goals:makeDefaultGoals(),memos:""};
+          const next=typeof updater==="function"?updater(cur):updater;
+          return {...prev,[activePortfolioId]:next};
+        });
+      },[activePortfolioId]);
+
+      const setData  =useCallback(fn=>setPData(p=>({...p,data:typeof fn==="function"?fn(p.data):fn})),[setPData]);
+      const setGoals =useCallback(fn=>setPData(p=>({...p,goals:typeof fn==="function"?fn(p.goals):fn})),[setPData]);
+      const setMemos =useCallback(v=>setPData(p=>({...p,memos:v})),[setPData]);
+
+      const fxRate = FX_RATES[currency]||1;
+      const sym    = FX_SYMBOLS[currency]||"$";
+      const computed=useMemo(()=>compute(data,fxRate),[data,fxRate]);
+
+      useEffect(()=>{
+        db.save({portfolios,activePortfolioId,portfolioData,history,currency});
+      },[portfolios,activePortfolioId,portfolioData,history,currency]);
+
+      const navigate=useCallback((target)=>{
+        if(target===page)return;
+        setAnimating(true);
+        setTimeout(()=>{ setPage(target); setAnimating(false); },220);
+      },[page]);
+
+      const deleteItem =id=>setData(p=>{
+        const n={...p};
+        for(const k of Object.keys(CATS)) n[k]=(p[k]||[]).filter(i=>i.id!==id);
+        return n;
+      });
+      const addItem=(cat,item)=>setData(p=>({...p,[cat]:[...(p[cat]||[]),{id:uid(),...item}]}));
+      const updateItem=(id,item)=>setData(p=>{
+        const n={...p};
+        for(const k of Object.keys(CATS)) n[k]=(p[k]||[]).map(i=>i.id===id?{...i,...item}:i);
+        return n;
+      });
+      const changeGross =v=>setData(p=>({...p,grossIncome:{...p.grossIncome,year:Number(v)}}));
+      const toggleCat   =k=>setCollapsed(p=>({...p,[k]:!p[k]}));
+      const upsertGoal  =g=>setGoals(p=>p.find(x=>x.id===g.id)?p.map(x=>x.id===g.id?g:x):[...p,g]);
+      const deleteGoal  =id=>setGoals(p=>p.filter(g=>g.id!==id));
+
+      const addPortfolio=()=>{
+        const id=uid();
+        const emoji=PORTFOLIO_EMOJIS[portfolios.length%PORTFOLIO_EMOJIS.length];
+        setPortfolios(p=>[...p,{id,name:`Budget ${p.length+1}`,emoji}]);
+        setPortfolioData(p=>({...p,[id]:{data:makeDefaultData(),goals:makeDefaultGoals(),memos:""}}));
+        setActivePortfolioId(id);
+        setCollapsed({});
+      };
+      const renamePortfolio=(id,name)=>setPortfolios(p=>p.map(x=>x.id===id?{...x,name}:x));
+      const deletePortfolio=id=>{
+        if(portfolios.length<=1) return;
+        const remaining=portfolios.filter(x=>x.id!==id);
+        setPortfolios(remaining);
+        setPortfolioData(p=>{ const n={...p}; delete n[id]; return n; });
+        if(activePortfolioId===id){ setActivePortfolioId(remaining[0].id); setCollapsed({}); }
+      };
+
+      const takeSnapshot=()=>{
+        const now=new Date();
+        const month=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+        if(history.find(h=>h.portfolioId===activePortfolioId&&h.month===month)) return;
+        setHistory(p=>[...p,{
+          id:uid(), portfolioId:activePortfolioId, month,
+          netMargin:computed.savingsRate*100, opMargin:computed.opMargin,
+          dtiRatio:computed.dtiRatio, savingsRate:computed.savingsRate*100,
+          capturedAt:now.toISOString(),
+        }]);
+      };
+
+      const openFab =(mode,cat=null,editItem=null,editGoal=null)=>setFab({open:true,mode,cat,editItem,editGoal});
+      const closeFab=()=>setFab({open:false,cat:null,editItem:null,editGoal:null,mode:null});
+
+      const exportCSV=()=>{
+        const rows=[["Section","Item","Monthly USD","Yearly USD","Weekly USD"]];
+        rows.push(["Gross Income","Annual",(data.grossIncome.year/MPY).toFixed(2),data.grossIncome.year.toFixed(2),(data.grossIncome.year/WPY).toFixed(2)]);
+        for(const k of Object.keys(CATS)) for(const item of (data[k]||[])){
+          const m=Number(item.amount);
+          rows.push([CATS[k].label,item.name,m.toFixed(2),(m*MPY).toFixed(2),(m/(WPY/MPY)).toFixed(2)]);
+        }
+        const a=document.createElement("a");
+        a.href=URL.createObjectURL(new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"}));
+        a.download=`fintrack-${activePortfolioId.slice(0,8)}.csv`; a.click();
+      };
+
+      if(loading) return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"system-ui"}}>Loading…</div>;
+      if(!user)   return <AuthScreen onAuth={signIn}/>;
+
+      const portfolioHistory=history.filter(h=>h.portfolioId===activePortfolioId);
+
+      return (
+        <div style={{maxWidth:600,margin:"0 auto",minHeight:"100vh",background:"#f8fafc",
+          fontFamily:"'DM Sans',system-ui,sans-serif",position:"relative"}}>
+
+          <header style={{position:"sticky",top:0,zIndex:100,
+            background:"rgba(248,250,252,.94)",backdropFilter:"blur(14px)",WebkitBackdropFilter:"blur(14px)",
+            borderBottom:"1px solid #e9ecef",padding:"10px 16px",
+            display:"flex",alignItems:"center",justifyContent:"space-between",
+            transform:"translateZ(0)"}}>
+            <div>
+              <p style={{margin:0,fontWeight:800,fontSize:16,color:"#111"}}>💼 FinTrack</p>
+              <p style={{margin:0,fontSize:10,color:"#9ca3af"}}>
+                {new Date().toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}
+              </p>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <PortfolioSelector
+                portfolios={portfolios} activeId={activePortfolioId}
+                onChange={id=>{ setActivePortfolioId(id); setCollapsed({}); }}
+                onAdd={addPortfolio} onRename={renamePortfolio} onDelete={deletePortfolio}/>
+              <select value={currency} onChange={e=>setCurrency(e.target.value)}
+                style={{border:"1px solid #e5e7eb",borderRadius:8,padding:"6px 8px",fontSize:12,fontWeight:700,
+                  color:"#2563eb",background:"#eff6ff",outline:"none",cursor:"pointer"}}>
+                {Object.entries(FX_SYMBOLS).map(([c,s])=><option key={c} value={c}>{s}{c}</option>)}
+              </select>
+            </div>
+          </header>
+
+          <main style={{padding:"16px 16px 100px",
+            opacity:animating?0:1,
+            transform:animating?"translateY(8px) scale(.99)":"translateY(0) scale(1)",
+            transition:"opacity .22s ease,transform .22s ease",willChange:"opacity,transform"}}>
+
+            {page==="dashboard"&&(
+              <DashboardPage
+                computed={computed} sym={sym} fxRate={fxRate} goals={goals}
+                onEditGoal={g=>openFab("editGoal",null,null,g)} onAddGoal={()=>openFab("addGoal")}
+                memos={memos} onMemosChange={setMemos}
+                data={data} onDataChange={d=>setData(()=>d)}
+                history={portfolioHistory} onTakeSnapshot={takeSnapshot}/>
+            )}
+            {page==="budget"&&(
+              <BudgetPage data={data} computed={computed} sym={sym} fxRate={fxRate}
+                onDelete={deleteItem}
+                onEditItem={item=>openFab("editItem",item.category,item)}
+                onOpenAdd={cat=>openFab("addItem",cat)}
+                collapsed={collapsed} onToggle={toggleCat} onChangeGross={changeGross}/>
+            )}
+            {page==="settings"&&(
+              <SettingsPage currency={currency} setCurrency={setCurrency} user={user}
+                onSignOut={signOut}
+                onReset={()=>{ setData(makeDefaultData()); setGoals(makeDefaultGoals()); setMemos(""); }}
+                onExport={exportCSV}
+                history={portfolioHistory}
+                onClearHistory={()=>setHistory(p=>p.filter(h=>h.portfolioId!==activePortfolioId))}/>
+            )}
+          </main>
+
+          {page==="budget"&&<FAB onClick={()=>openFab("addItem","fixedCosts")}/>}
+
+          <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",
+            width:"100%",maxWidth:600,
+            background:"rgba(255,255,255,.96)",backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",
+            borderTop:"1px solid #e9ecef",display:"flex",zIndex:120,
+            paddingBottom:"env(safe-area-inset-bottom)",willChange:"transform"}}>
+            {NAV.map(n=>(
+              <button key={n.id} onClick={()=>navigate(n.id)}
+                style={{flex:1,border:"none",background:"none",display:"flex",flexDirection:"column",
+                  alignItems:"center",gap:2,padding:"10px 0",cursor:"pointer",
+                  color:page===n.id?"#2563eb":"#9ca3af",fontWeight:page===n.id?700:400,fontSize:10,
+                  minHeight:56,transition:"color .15s",WebkitTapHighlightColor:"transparent"}}>
+                <span style={{fontSize:21,transition:"transform .18s",
+                  transform:page===n.id?"scale(1.18)":"scale(1)"}}>{n.icon}</span>
+                {n.label}
+              </button>
+            ))}
+          </nav>
+
+          <AddItemSheet
+            open={fab.open&&(fab.mode==="addItem"||fab.mode==="editItem")}
+            onClose={closeFab} editItem={fab.editItem} defaultCat={fab.cat} sym={sym} fxRate={fxRate}
+            onSubmit={(cat,payload)=>{
+              if(fab.editItem) updateItem(fab.editItem.id,payload);
+              else addItem(cat,payload);
+              closeFab();
+            }}
+            onDelete={fab.editItem?()=>{ deleteItem(fab.editItem.id); closeFab(); }:null}/>
+
+          <GoalSheet
+            open={fab.open&&(fab.mode==="addGoal"||fab.mode==="editGoal")}
+            onClose={closeFab} editGoal={fab.editGoal} sym={sym} fxRate={fxRate}
+            onSubmit={g=>{ upsertGoal(g); closeFab(); }}
+            onDelete={fab.editGoal?()=>{ deleteGoal(fab.editGoal.id); closeFab(); }:null}/>
+
+          <style>{`
+            @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
+            *{box-sizing:border-box;margin:0;padding:0;}
+            html,body{background:#f8fafc;overscroll-behavior:none;}
+            *::-webkit-scrollbar{display:none;}
+            *{-ms-overflow-style:none;scrollbar-width:none;}
+            input[type=number]::-webkit-inner-spin-button{opacity:.35;}
+            input:focus,textarea:focus,select:focus{
+              border-color:#2563eb!important;
+              box-shadow:0 0 0 3px rgba(37,99,235,.12);
+              outline:none;
+            }
+            button{-webkit-tap-highlight-color:transparent;}
+            main,nav,header{transform:translateZ(0);}
+            @media(min-width:640px){main{padding:24px 24px 100px;}}
+          `}</style>
+        </div>
+      );
+    }
+
+    // ─── Mount ────────────────────────────────────────────────────────────────────
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+
+    // Hide splash once React has rendered
+    requestAnimationFrame(()=>{
+      requestAnimationFrame(()=>{
+        const splash = document.getElementById("splash");
+        if(splash){ splash.classList.add("fade"); setTimeout(()=>splash.remove(), 450); }
+      });
+    });
+  </script>
+</body>
+</html>
